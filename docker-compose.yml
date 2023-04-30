@@ -1,0 +1,121 @@
+version: '3'
+services:
+
+  database:
+    image: ivanjatz/aass
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
+      timeout: 60s
+      retries: 10
+
+  filter_microservice_kafka:
+    build:  
+      context: ../aass_project_train_be/kafka/filter_microservice_kafka/.
+    #image: ivanjatz/filter-microservice
+    ports:
+      - "8001:8000"
+    environment:
+      - DB_HOST=database
+    depends_on:
+      database:
+        condition: service_healthy
+
+  price_microservice_kafka:
+    #image: ivanjatz/price-calculator-microservice
+    build: 
+      context: ../aass_project_train_be/kafka/price_calculation_microservice_kafka/.
+    ports:
+      - "8002:8000"
+    environment:
+      - DB_HOST=database
+    depends_on:
+      database:
+        condition: service_healthy
+      kafka-actualizer:
+        condition: service_completed_successfully
+
+  ticket_microservice_kafka:
+    #image: ivanjatz/ticket-microservice
+    build:  
+      context: ../aass_project_train_be/kafka/ticket_microservice_kafka/.
+    ports:
+      - "8003:8000"
+    environment:
+      - DB_HOST=database
+    depends_on:
+      database:
+        condition: service_healthy
+      kafka-actualizer:
+        condition: service_completed_successfully
+
+  notification_microservice_kafka:
+    #image: ivanjatz/notification-microservice
+    build:  
+      context: ../aass_project_train_be/kafka/notification_microservice_kafka/.
+    ports:
+      - "8004:8000"
+    environment:
+      - DB_HOST=database
+    depends_on:
+      database:
+        condition: service_healthy
+      kafka-actualizer:
+        condition: service_completed_successfully
+
+  web:
+    build:  
+      context: ../aass-project-train-fe/.
+    ports:
+      - "8081:8080"
+    environment:
+      - PRICE_HOST=price_microservice_kafka
+      - PRICE_PORT=8000
+      - TICKET_HOST=ticket_microservice_kafka
+      - TICKET_PORT=8000
+      - FILTER_HOST=filter_microservice_kafka
+      - FILTER_PORT=8000
+    depends_on:
+      database:
+        condition: service_healthy
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.2
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  broker:
+    image: confluentinc/cp-kafka:7.3.2
+    container_name: broker
+    ports:
+    # To learn about configuring Kafka for access across networks see
+    # https://www.confluent.io/blog/kafka-client-cannot-connect-to-broker-on-aws-on-docker-etc/
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:9092,PLAINTEXT_INTERNAL://broker:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+  kafka-actualizer:
+    image: confluentinc/cp-kafka:7.3.2
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # blocks until kafka is reachable
+      kafka-topics --bootstrap-server broker:29092 --list
+
+      kafka-topics --create --if-not-exists --topic calc-price --partitions 1 --replication-factor 1 --bootstrap-server broker:29092
+      kafka-topics --create --if-not-exists --topic create-ticket --partitions 1 --replication-factor 1 --bootstrap-server broker:29092
+      kafka-topics --create --if-not-exists --topic notify-user --partitions 1 --replication-factor 1 --bootstrap-server broker:29092
+      echo -e 'Successfully created the following topics:'
+      kafka-topics --bootstrap-server broker:29092 --list
+      "
